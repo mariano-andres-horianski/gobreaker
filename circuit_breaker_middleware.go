@@ -15,6 +15,8 @@ import (
 	"time"
 )
 
+// Generic value that means "anything an hypothetical service returns"
+// since it's not like I'm gonna use this anyway
 type Value struct{}
 type circuit_breaker struct {
 	mu               sync.Mutex
@@ -46,6 +48,9 @@ func NewCircuitBreaker(threshold int, timeout time.Duration, halfOpenDuration ti
 		timeout:          timeout,
 	}
 }
+
+// This function seems pointless for now, might delete it since
+// readability is not really improved and so called "good practices" are not necessary in learning projects
 func (c *circuit_breaker) shouldTrip() bool {
 	return c.failureCount >= c.threshold
 }
@@ -58,7 +63,7 @@ func (c *circuit_breaker) trip() {
 	c.mu.Unlock()
 }
 
-func (c *circuit_breaker) CheckService(operation func() (Value, error)) Value, error {
+func (c *circuit_breaker) CheckService(operation func() (Value, error)) (Value, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	if c.state == "Open" {
@@ -77,12 +82,12 @@ func (c *circuit_breaker) CheckService(operation func() (Value, error)) Value, e
 				c.trip()
 			}
 		} else {
-			return _, ErrCircuitOpen
+			return Value{}, ErrCircuitOpen
 		}
 	}
 	if c.state == "Closed" {
 		return operation()
 	}
 
-	return _, nil
+	return Value{}, nil
 }
