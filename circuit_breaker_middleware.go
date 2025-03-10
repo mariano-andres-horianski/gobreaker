@@ -33,7 +33,6 @@ type circuit_breaker struct {
 var (
 	ErrCircuitOpen         = errors.New("circuit breaker is open")
 	ErrTooManyTestRequests = errors.New("too many test requests in half-open state")
-	ErrUnknownState        = errors.New("unknown circuit breaker state")
 )
 
 func NewCircuitBreaker(threshold int, timeout time.Duration, halfOpenDuration time.Duration) *circuit_breaker {
@@ -41,19 +40,15 @@ func NewCircuitBreaker(threshold int, timeout time.Duration, halfOpenDuration ti
 		mu:               sync.Mutex{},
 		state:            "Closed",
 		threshold:        threshold,
-		successCount:     0,
+		successCount:     0, // May use it to calculate % of successful requests, haven't decided yet
 		failureCount:     0,
 		halfOpenCount:    0,
 		halfOpenDuration: halfOpenDuration,
-		timeout:          timeout,
+		timeout:          timeout, // Closed state duration
+
 	}
 }
 
-// This function seems pointless for now, might delete it since
-// readability is not really improved and so called "good practices" are not necessary in learning projects
-func (c *circuit_breaker) shouldTrip() bool {
-	return c.failureCount >= c.threshold
-}
 func (c *circuit_breaker) trip() {
 	c.mu.Lock()
 	c.state = "Open"
@@ -66,27 +61,38 @@ func (c *circuit_breaker) trip() {
 func (c *circuit_breaker) CheckService(operation func() (Value, error)) (Value, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
+
 	if c.state == "Open" {
 		if time.Since(c.lastStateChange) > c.timeout {
 			c.state = "halfOpen"
 			c.halfOpenCount = 0
-			for i := 0; i < c.threshold; i++ {
-				_, err := operation()
-				if err != nil {
-					c.failureCount++
-				} else {
-					c.successCount++
-				}
+			val, err := operation()
+			if err != nil {
+				c.halfOpenCount++
+			} else {
+				return val, nil
 			}
-			if c.shouldTrip() {
+			if c.halfOpenCount >= c.threshold || time.Since(c.lastStateChange) > c.halfOpenDuration {
 				c.trip()
+				return Value{}, ErrTooManyTestRequests
 			}
+			return Value{}, err
 		} else {
 			return Value{}, ErrCircuitOpen
 		}
 	}
 	if c.state == "Closed" {
-		return operation()
+		val, err := operation()
+		if err != nil {
+			c.failureCount++
+			if c.failureCount >= c.threshold {
+				c.trip()
+			}
+			return Value{}, err
+		} else {
+			c.successCount++
+			return val, nil
+		}
 	}
 
 	return Value{}, nil
