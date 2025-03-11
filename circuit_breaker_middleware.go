@@ -1,12 +1,3 @@
-// In a system, service A calls B which in turn calls C.
-// This middleware monitors B, and it will return three states:
-// Closed, Open, and HalfOpen.
-// If the state is closed, it will forward the request to B.
-// If the state is open, it will not forward the request to B.
-// If the state is halfOpen, it will forward the request to B, but it will not forward the request to C.
-// If it detects a number of consecutive failed requests, it switches to open.
-// After some time being open, it will switch to halfOpen.
-// If it detects a number of consecutive successful requests, it will switch to closed.
 package circuit_breaker
 
 import (
@@ -26,13 +17,13 @@ type circuit_breaker struct {
 	failureCount     int
 	halfOpenCount    int //test request counter during half open state
 	halfOpenDuration time.Duration
-	timeout          time.Duration
+	timeout          time.Duration // Closed state duration
 	lastStateChange  time.Time
 }
 
 var (
 	ErrCircuitOpen         = errors.New("circuit breaker is open")
-	ErrTooManyTestRequests = errors.New("too many test requests in half-open state")
+	ErrTooManyTestRequests = errors.New("too many failed test requests in half-open state")
 )
 
 func NewCircuitBreaker(threshold int, timeout time.Duration, halfOpenDuration time.Duration) *circuit_breaker {
@@ -40,12 +31,11 @@ func NewCircuitBreaker(threshold int, timeout time.Duration, halfOpenDuration ti
 		mu:               sync.Mutex{},
 		state:            "Closed",
 		threshold:        threshold,
-		successCount:     0, // May use it to calculate % of successful requests, haven't decided yet
+		successCount:     0,
 		failureCount:     0,
 		halfOpenCount:    0,
 		halfOpenDuration: halfOpenDuration,
-		timeout:          timeout, // Closed state duration
-
+		timeout:          timeout,
 	}
 }
 
@@ -57,8 +47,18 @@ func (c *circuit_breaker) trip() {
 	c.failureCount = 0
 	c.mu.Unlock()
 }
-
+func (c *circuit_breaker) reset() {
+	c.mu.Lock()
+	c.state = "Closed"
+	c.lastStateChange = time.Now()
+	c.failureCount = 0
+	c.mu.Unlock()
+}
 func (c *circuit_breaker) CheckService(operation func() (Value, error)) (Value, error) {
+	// If requests are successful, retrieve the result and keep open or half open the circuit
+	// If enough requests are successful in a row in half open state, switch to closed
+	// If enough consecutive requests fail, switch to closed
+	// If the circuit could not handle the half open state in enough time, switch to open yet again
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -70,6 +70,11 @@ func (c *circuit_breaker) CheckService(operation func() (Value, error)) (Value, 
 			if err != nil {
 				c.halfOpenCount++
 			} else {
+				c.successCount++
+				// After enough successful requests, switch to closed
+				if c.successCount >= c.threshold {
+					c.reset()
+				}
 				return val, nil
 			}
 			if c.halfOpenCount >= c.threshold || time.Since(c.lastStateChange) > c.halfOpenDuration {
@@ -85,12 +90,13 @@ func (c *circuit_breaker) CheckService(operation func() (Value, error)) (Value, 
 		val, err := operation()
 		if err != nil {
 			c.failureCount++
+			// If it detects a number of consecutive failed requests, it will switch to open.
 			if c.failureCount >= c.threshold {
 				c.trip()
 			}
 			return Value{}, err
 		} else {
-			c.successCount++
+			c.failureCount = 0
 			return val, nil
 		}
 	}
